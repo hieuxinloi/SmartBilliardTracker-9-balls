@@ -33,21 +33,20 @@ env/
 *~
 
 # Output files
-# output*/
-# *.mp4
-# *.avi
-# *.csv
-# *.jpg
-# *.png
-# *.jpeg
+output*/
+*.mp4
+*.avi
+*.csv
+*.jpg
+*.png
+*.jpeg
 
-# Model files (optional - uncomment if models are too large for git)
-# models/*.pt
-# models/*.pth
+# Assets và dataset - KHÔNG UP
+assets/
+videos/
 
-# Dataset (optional - uncomment if dataset is too large)
-# assets/dataset/
-# videos/
+# Processing data - KHÔNG UP
+processing_data/
 
 # OS
 .DS_Store
