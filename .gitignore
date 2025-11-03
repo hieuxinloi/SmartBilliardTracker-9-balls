@@ -1,0 +1,15 @@
+# Bỏ qua asset, video, và data
+assets/
+videos/
+processing_data/
+output10/
+
+# Bỏ qua các file tạm, log, cache
+__pycache__/
+*.log
+*.tmp
+*.bak
+*.pyc
+# Bỏ qua các file hệ thống
+.DS_Store
+Thumbs.db
