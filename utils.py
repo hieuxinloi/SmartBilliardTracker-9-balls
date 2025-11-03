@@ -14,23 +14,12 @@ def ensure_dir(path):
 
 
 def distance(b1, b2):
-    """
-    Tính khoảng cách Euclid giữa 2 bi (ball)
-    Args:
-        b1, b2: dict chứa toạ độ {"x": ..., "y": ...}
-    """
+
     return np.sqrt((b1["x"] - b2["x"]) ** 2 + (b1["y"] - b2["y"]) ** 2)
 
 
 def draw_circle(frame, ball, color=(0, 255, 0), thickness=2):
-    """
-    Vẽ đường tròn quanh bi và đánh dấu tâm.
-    Args:
-        frame: frame ảnh OpenCV
-        ball: dict {"x":..., "y":..., "r":...}
-        color: màu (BGR)
-        thickness: độ dày đường tròn (default: 2)
-    """
+  
     center = (int(ball["x"]), int(ball["y"]))
     radius = int(ball["r"])
     cv2.circle(frame, center, radius, color, thickness)
