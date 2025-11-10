@@ -6,17 +6,23 @@ from utils.helpers import Detection
 import queue
 
 
-def detect_thread(model_path, frame_queue, detect_queue,  conf_threshold=0.1):
+def detect_thread(model_path, frame_queue, detect_queue, rel_frame_queue,  conf_threshold=0.1):
 
     
     model = YOLO(model_path)
+    dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+    for _ in range(30):
+        _ = model.predict(source=dummy, conf=conf_threshold, verbose=False)
+    print("Model warmed up!")
     print("Start detecting...")
     while True:
         try:
-            frame_id, item = frame_queue.get(timeout=2)
-            if item is None:
+            data = frame_queue.get(timeout=2)            
+            if data is None:
                 break
-            
+            rel_frame_queue.put(data)
+            frame_id, item = data
+
             results = model.predict(source=item, conf=conf_threshold, verbose=False)[0]
             boxes = results.boxes.xyxy.cpu().numpy() if results.boxes.xyxy.numel() > 0 else []
             confs = results.boxes.conf.cpu().numpy() if results.boxes.conf.numel() > 0 else []
@@ -38,6 +44,9 @@ def detect_thread(model_path, frame_queue, detect_queue,  conf_threshold=0.1):
         except Exception as e:
             print(f"Detection error: {e}")
             continue
+    detect_queue.put(None)
+
+    
 
     
  
