@@ -1,0 +1,58 @@
+version: "3.8"
+
+services:
+  # Original video processing API
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - ./models:/app/models
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000
+    networks:
+      - billiard-network
+
+  # New real-time game system API
+  backend-game:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - ./models:/app/models
+      - ./match_history:/app/match_history
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: python backend/main_game.py
+    networks:
+      - billiard-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+      - backend-game
+    networks:
+      - billiard-network
+
+networks:
+  billiard-network:
+    driver: bridge
+
+volumes:
+  uploads:
+  outputs:
+  match_history:

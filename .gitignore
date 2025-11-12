@@ -1,15 +1,129 @@
-# Bỏ qua asset, video, và data
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmyp.json
+
+# Node.js / React
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+package-lock.json
+yarn.lock
+
+# React build
+frontend/build/
+frontend/dist/
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Uploaded videos and outputs
+uploads/
+outputs/
+match_history/
 assets/
 videos/
 processing_data/
 output10/
 
-# Bỏ qua các file tạm, log, cache
-__pycache__/
+# Video files (anywhere in project)
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.flv
+*.wmv
+*.m4v
+*.mpg
+*.mpeg
+
+# Model files (large binary files - keep structure but ignore weights)
+models/*.pt
+models/*.pth
+models/*.onnx
+models/*.h5
+!models/.gitkeep
+
+# Logs
 *.log
-*.tmp
-*.bak
-*.pyc
-# Bỏ qua các file hệ thống
+logs/
+
+# OS specific
 .DS_Store
 Thumbs.db
+*.swp
+*.swo
+*~
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+
+# Testing
+.tox/
+.nox/
+
+# Data files
+*.csv
+backend/data/matches.json
+
+# Compiled files
+*.pyc
+*.pyo
