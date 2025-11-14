@@ -26,6 +26,23 @@ from datetime import datetime
 from pathlib import Path
 import shutil
 import numpy as np
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
+# Create game events log file
+game_events_logger = logging.getLogger('game_events')
+game_events_logger.setLevel(logging.INFO)
+game_log_dir = Path('backend/logs')
+game_log_dir.mkdir(parents=True, exist_ok=True)
+game_log_file = game_log_dir / f'game_events_{datetime.now().strftime("%Y%m%d")}.log'
+file_handler = logging.FileHandler(game_log_file)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+game_events_logger.addHandler(file_handler)
 
 # Add parent directory to path to import project modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -193,14 +210,36 @@ async def process_frame_for_game(frame, frame_idx, model, prev_frame_detections)
                 }
             )
 
-        # Simple tracking: keep best detection per class
+        # Step 1: Merge overlapping detections in same frame (like video processing)
+        from ball_detect import merge_overlapping_detections, compute_iou
+
+        detections_merged = merge_overlapping_detections(detections, iou_threshold=0.7)
+
+        # Step 2: IoU-based tracking - correct labels using previous frame (like video processing)
+        if prev_frame_detections:
+            for det in detections_merged:
+                best_iou = 0
+                best_prev_det = None
+                for prev_det in prev_frame_detections:
+                    iou = compute_iou(det, prev_det)
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_prev_det = prev_det
+
+                # If IoU > threshold, use previous frame's label (corrects misdetections)
+                if best_iou > 0.7:
+                    det["name"] = best_prev_det["name"]
+
+        # Step 3: Keep best detection per class (like video processing)
         best_per_class = {}
-        for det in detections:
+        for det in detections_merged:
             cls = det["name"]
             if cls not in best_per_class or det["conf"] > best_per_class[cls]["conf"]:
                 best_per_class[cls] = det
 
-        return list(best_per_class.values()), detections
+        detections_filtered = list(best_per_class.values())
+
+        return detections_filtered, detections_filtered
 
     except Exception as e:
         print(f"[ERROR] Frame {frame_idx} processing: {e}")
@@ -276,11 +315,28 @@ async def real_time_detection_task(
 
         frame_idx = 0
         prev_frame_data = None
-        frames_buffer = []  # Store recent frames for collision detection
-        last_collision_check = 0
+        prev_frame_detections = []  # For IoU-based tracking (like video processing)
+        frames_buffer = (
+            []
+        )  # Store ALL frames for collision detection (like video processing)
+        processed_collision_ids = (
+            set()
+        )  # Track collisions for game events (to avoid duplicate events)
+        logged_collision_ids = (
+            set()
+        )  # Track collisions for log file (to avoid duplicates in JSON)
         recent_collisions = (
             []
         )  # Track recent collisions for visualization (frame_idx, ball_data)
+        all_collisions = []  # Track all collisions for logging to file
+
+        # Prepare collision log file path
+        video_name = (
+            Path(video_source).stem if isinstance(video_source, str) else "camera"
+        )
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        collision_log_file = f"outputs/{video_name}_{timestamp}_collisions.json"
+        os.makedirs("outputs", exist_ok=True)
 
         # Notify game started
         await manager.broadcast(
@@ -301,23 +357,29 @@ async def real_time_detection_task(
             if not ret:
                 if isinstance(video_source, str):  # Video file ended
                     print("[Detection] Video ended")
+
+                    # Collision log is already saved in real-time
+                    if all_collisions:
+                        print(
+                            f"[COLLISION LOG] Final count: {len(all_collisions)} collisions saved to {collision_log_file}"
+                        )
+
                     break
                 continue
 
             frame_idx += 1
 
-            # Process frame
-            balls, raw_detections = await process_frame_for_game(
-                frame, frame_idx, model, prev_frame_data
+            # Process frame with IoU-based tracking (like video processing)
+            balls, prev_frame_detections = await process_frame_for_game(
+                frame, frame_idx, model, prev_frame_detections
             )
 
             # Store frame data
             current_frame_data = {"frame_idx": frame_idx, "balls": balls}
             frames_buffer.append(current_frame_data)
 
-            # Keep only last 100 frames for collision detection
-            if len(frames_buffer) > 100:
-                frames_buffer.pop(0)
+            # Don't limit buffer size - keep ALL frames like video processing does
+            # This ensures we don't miss any collisions
 
             # Check ball movement
             if prev_frame_data and len(frames_buffer) >= 2:
@@ -338,45 +400,73 @@ async def real_time_detection_task(
 
                 game_manager.update_movement(is_moving)
 
-            # Collision detection every 5 frames (more frequent to catch collisions)
-            if len(frames_buffer) >= 10 and frame_idx - last_collision_check >= 5:
-                last_collision_check = frame_idx
-
-                # Check if cueball is present in recent frames before running collision detection
-                recent_frames = frames_buffer[-10:]
-                cueball_present = any(
-                    any(b["name"] == "cueball" for b in frame["balls"]) 
-                    for frame in recent_frames
-                )
+            # Collision detection on recent frames to catch new collisions
+            if len(frames_buffer) >= 2:
+                # Check if cueball is present in current frame
+                cueball_present = any(b["name"] == "cueball" for b in balls)
 
                 if not cueball_present:
-                    print(f"[COLLISION] Skipping - cueball not found in recent frames at frame {frame_idx}")
+                    if frame_idx % 60 == 0:
+                        print(
+                            f"[COLLISION] Skipping - cueball not found at frame {frame_idx}"
+                        )
 
-                # Run collision detection on recent frames
+                # Run collision detection on ALL frames (same as video processing)
+                # The duplicate prevention with processed_collision_ids ensures we only handle new collisions
                 try:
                     collisions = get_collisions_from_data(
-                        recent_frames,
+                        frames_buffer,  # Use ALL frames like video processing
                         cue_ball_name="cueball",
-                        move_thresh=0.3,
-                        contact_margin=10.0,
+                        move_thresh=0.3,  # Same as video processing
+                        contact_margin=10.0,  # Same as video processing
                     )
 
-                    # Log collision detection results
+                    # Log collision detection results with details
                     if collisions:
-                        print(f"[COLLISION] Detected {len(collisions)} collision(s) at frame {frame_idx}")
+                        collision_details = ", ".join(
+                            [f"{c['ball']['name']}" for c in collisions]
+                        )
+                        print(
+                            f"[COLLISION] Detected {len(collisions)} collision(s) at frame {frame_idx}: {collision_details}"
+                        )
                     elif cueball_present and frame_idx % 60 == 0:
                         # Log periodically when no collisions detected but cueball is present
-                        print(f"[COLLISION] No collisions detected at frame {frame_idx} (cueball present)")
+                        print(
+                            f"[COLLISION] No collisions detected at frame {frame_idx} (cueball present)"
+                        )
 
-                    # Process each collision
+                    # Process each collision (avoid duplicates)
                     for coll in collisions:
                         ball_name = coll["ball"]["name"]
+
+                        # Create unique ID for this collision
+                        collision_id = (coll["frame_id"], ball_name)
+
+                        # Skip if already processed (prevents duplicate game events)
+                        if collision_id in processed_collision_ids:
+                            # Already handled this collision - skip silently
+                            continue
+
+                        processed_collision_ids.add(collision_id)
+
                         collision_event = game_manager.process_collision(ball_name)
                         collision_event["frame_idx"] = coll["frame_id"]
                         collision_event["cueball"] = convert_numpy_types(
                             coll["cueball"]
                         )
                         collision_event["ball"] = convert_numpy_types(coll["ball"])
+
+                        # Log collision details to console
+                        print(
+                            f"[COLLISION] Frame {coll['frame_id']}: cueball hit {ball_name}"
+                        )
+                        print(
+                            f"  Cueball pos: ({coll['cueball']['x']:.1f}, {coll['cueball']['y']:.1f})"
+                        )
+                        print(
+                            f"  Ball pos: ({coll['ball']['x']:.1f}, {coll['ball']['y']:.1f})"
+                        )
+                        print(f"  Valid: {collision_event.get('valid', True)}")
 
                         # Store collision for visualization (keep for ~30 frames)
                         recent_collisions.append(
@@ -387,6 +477,51 @@ async def real_time_detection_task(
                                 "ball_name": ball_name,
                             }
                         )
+
+                        # Store collision permanently for log file (merge sequential collisions)
+                        if collision_id not in logged_collision_ids:
+                            # Check if this is a sequential collision (same ball, within 2 frames of last)
+                            should_log = True
+                            if all_collisions:
+                                last_collision = all_collisions[-1]
+                                same_ball = last_collision["ball"]["name"] == ball_name
+                                frame_gap = (
+                                    coll["frame_id"] - last_collision["frame_id"]
+                                )
+
+                                # If same ball and within 2 frames, it's a sequential collision - skip
+                                if same_ball and 0 < frame_gap <= 2:
+                                    should_log = False
+                                    print(
+                                        f"[COLLISION] Skipping sequential collision: {ball_name} at frame {coll['frame_id']} (already logged at {last_collision['frame_id']})"
+                                    )
+
+                            if should_log:
+                                logged_collision_ids.add(collision_id)
+                                collision_data = {
+                                    "frame_id": coll["frame_id"],
+                                    "cueball": convert_numpy_types(coll["cueball"]),
+                                    "ball": convert_numpy_types(coll["ball"]),
+                                    "valid": collision_event.get("valid", True),
+                                    "player": collision_event.get("player", ""),
+                                }
+                                all_collisions.append(collision_data)
+
+                                # Save to file immediately (real-time logging) - only when new collision added
+                                try:
+                                    with open(collision_log_file, "w") as f:
+                                        json.dump(
+                                            {
+                                                "video": video_source,
+                                                "timestamp": timestamp,
+                                                "total_collisions": len(all_collisions),
+                                                "collisions": all_collisions,
+                                            },
+                                            f,
+                                            indent=2,
+                                        )
+                                except Exception as e:
+                                    print(f"[ERROR] Failed to save collision log: {e}")
 
                         await manager.broadcast(collision_event)
 
@@ -419,7 +554,9 @@ async def real_time_detection_task(
 
                 # Log detection every 30 frames for debugging
                 if frame_idx % 30 == 0:
-                    print(f"[DETECT] Frame {frame_idx}: Cueball={cueball_detected}, Balls={sorted(detected_ball_numbers)}")
+                    print(
+                        f"[DETECT] Frame {frame_idx}: Cueball={cueball_detected}, Balls={sorted(detected_ball_numbers)}"
+                    )
 
                 # Update ball tracking (handles potted, reappeared, scratch)
                 tracking_events = game_manager.update_ball_tracking(
@@ -456,7 +593,7 @@ async def real_time_detection_task(
                 traceback.print_exc()
 
             # Check for movement timeout
-            timeout_event = game_manager.check_movement_timeout()
+            timeout_event = game_manager.check_movement_timeout(current_frame=frame_idx)
             if timeout_event:
                 await manager.broadcast(timeout_event)
 

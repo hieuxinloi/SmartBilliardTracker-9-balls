@@ -104,14 +104,18 @@ function App() {
     // Ball missing (tentatively potted - show in UI immediately)
     on("ball_missing", (data) => {
       console.log("[Ball Missing - Tentatively Potted]", data);
-      console.log(`Ball ${data.ball} disappeared - showing as potted in status bar`);
+      console.log(
+        `Ball ${data.ball} disappeared - showing as potted in status bar`
+      );
       // Game state will be updated automatically via frame_update
     });
 
     // Ball reappearance (was occluded, not potted)
     on("ball_reappeared", (data) => {
       console.log("[Ball Reappeared]", data);
-      console.log(`Ball ${data.ball} was occluded, not actually potted - reverting status`);
+      console.log(
+        `Ball ${data.ball} was occluded, not actually potted - reverting status`
+      );
       // Game state will be updated automatically via frame_update
     });
 

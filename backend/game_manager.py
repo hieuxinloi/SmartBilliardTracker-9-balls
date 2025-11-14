@@ -10,6 +10,9 @@ from enum import Enum
 import json
 from pathlib import Path
 import copy
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class GameState(Enum):
@@ -84,7 +87,7 @@ class BallTracker:
                     # Ball reappeared after being marked as missing/potted
                     reappear_frames = state_info["missing_frames"]
                     print(
-                        f"[BallTracker] Ball {ball_num} REAPPEARED after {reappear_frames} frames (was occluded, not potted)"
+                        f"[BallTracker] bi{ball_num} REAPPEARED after {reappear_frames} frames (was occluded, not potted)"
                     )
                     state_info["state"] = BallState.ON_TABLE
                     state_info["missing_frames"] = 0
@@ -103,7 +106,7 @@ class BallTracker:
                         state_info["state"] = BallState.MISSING
                         state_info["missing_frames"] = 1
                         print(
-                            f"[BallTracker] Ball {ball_num} went MISSING (tentatively potted in UI)"
+                            f"[BallTracker] bi{ball_num} went MISSING (tentatively potted in UI)"
                         )
                         newly_missing.append(ball_num)
                     else:
@@ -283,17 +286,15 @@ class GameManager:
 
     def is_in_break_grace_period(self) -> bool:
         """
-        Check if we're within the break shot grace period (first 10 seconds)
-        During this time, hit-first-ball rule is not enforced
-        
+        Check if we're on the break shot (first turn)
+        During the break shot, hit-first-ball rule is not enforced
+
         Returns:
-            True if within grace period, False otherwise
+            True if on break shot (turn 1), False otherwise
         """
-        if not self.game_start_timestamp:
-            return False
-        
-        elapsed = (datetime.now() - self.game_start_timestamp).total_seconds()
-        return elapsed < self.break_grace_period
+        # Break shot is when no turns have been completed yet (no snapshots)
+        # Or we're still on the first turn (snapshot count = 0 or 1)
+        return len(self.state_snapshots) <= 1
 
     def process_collision(self, ball_name: str) -> Dict:
         """
@@ -318,13 +319,20 @@ class GameManager:
 
             # Check if we're in break grace period (first 10 seconds)
             in_grace_period = self.is_in_break_grace_period()
-            
-            # Check if hit the lowest ball first (skip validation during grace period)
+
+            # 9-ball rule: During break shot, any ball can be hit first
+            # After break, must hit lowest numbered ball first
             if in_grace_period:
-                is_valid_hit = True  # Always valid during break shot
-                print(f"[GameManager] Break grace period active - hit validation skipped")
+                is_valid_hit = True  # Break shot - can hit any ball
+                print(
+                    f"[GameManager] Break shot - hit bi{ball_num} (any ball allowed on break)"
+                )
             else:
                 is_valid_hit = ball_num == self.lowest_ball
+                if not is_valid_hit:
+                    print(
+                        f"[GameManager] Invalid hit: bi{ball_num} hit but lowest is bi{self.lowest_ball}"
+                    )
 
             event = {
                 "event": "first_hit",
@@ -333,12 +341,12 @@ class GameManager:
                 "valid": is_valid_hit,
                 "lowest_ball": self.lowest_ball,
                 "player": self.players[self.current_player_idx].name,
-                "message": f"{self.players[self.current_player_idx].name} hit ball {ball_num}",
+                "message": f"{self.players[self.current_player_idx].name} hit bi{ball_num}",
                 "in_grace_period": in_grace_period,
             }
 
             if not is_valid_hit:
-                event["foul_reason"] = f"Must hit ball {self.lowest_ball} first"
+                event["foul_reason"] = f"Must hit bi{self.lowest_ball} first"
 
             self._add_event("collision", event)
             return event
@@ -369,7 +377,7 @@ class GameManager:
                 "ball": ball_num,
                 "ball_name": f"bi{ball_num}",
                 "tentative": True,
-                "message": f"Ball {ball_num} disappeared (tentatively potted)",
+                "message": f"bi{ball_num} disappeared (tentatively potted)",
             }
             events.append(event)
 
@@ -385,13 +393,13 @@ class GameManager:
             events.append(event)
 
         # Check cueball scratch
-        scratch_event = self.check_cueball_scratch(cueball_detected)
+        scratch_event = self.check_cueball_scratch(cueball_detected, frame_idx)
         if scratch_event:
             events.append(scratch_event)
 
         return events
 
-    def check_cueball_scratch(self, cueball_detected: bool) -> Optional[Dict]:
+    def check_cueball_scratch(self, cueball_detected: bool, frame_idx: int = None) -> Optional[Dict]:
         """
         Check if cueball has been scratched (potted)
 
@@ -424,7 +432,7 @@ class GameManager:
             }
 
             # Process as foul
-            foul_event = self.process_foul("Cueball scratched")
+            foul_event = self.process_foul("Cueball scratched", frame_idx=frame_idx)
             event.update(foul_event)
 
             return event
@@ -464,7 +472,7 @@ class GameManager:
             "event": "ball_reappeared",
             "ball": ball_num,
             "ball_name": f"bi{ball_num}",
-            "message": f"Ball {ball_num} reappeared (was occluded, not potted)",
+            "message": f"bi{ball_num} reappeared (was occluded, not potted)",
             "balls_on_table": sorted(list(self.balls_on_table)),
             "lowest_ball": self.lowest_ball,
         }
@@ -503,7 +511,7 @@ class GameManager:
                 "ball": ball_num,
                 "ball_name": ball_name,
                 "player": self.players[self.current_player_idx].name,
-                "message": f"{self.players[self.current_player_idx].name} pre-potted ball {ball_num} (no score)",
+                "message": f"{self.players[self.current_player_idx].name} pre-potted bi{ball_num} (no score)",
             }
             # Track for this turn but not scoring
             self.last_potted_balls.append(ball_num)
@@ -526,12 +534,17 @@ class GameManager:
             "ball_name": ball_name,
             "valid": is_valid,
             "player": self.players[self.current_player_idx].name,
-            "message": f"{self.players[self.current_player_idx].name} potted ball {ball_num}",
+            "message": f"{self.players[self.current_player_idx].name} potted bi{ball_num}",
         }
 
+        # In demo mode (or normal 9-ball), credit any potted ball to current player during their turn
+        # This ensures the player gets credit for all balls they pocket
+        self.players[self.current_player_idx].potted_balls.append(ball_num)
+        print(
+            f"[GameManager] bi{ball_num} credited to {self.players[self.current_player_idx].name}"
+        )
+
         if is_valid:
-            # Add to player's score (any legally potted ball counts)
-            self.players[self.current_player_idx].potted_balls.append(ball_num)
 
             # Check for game end (9-ball potted legally = WIN)
             if ball_num == 9:
@@ -558,11 +571,9 @@ class GameManager:
                     event["valid"] = False
                     event["early_nine"] = True
                     event["foul_reason"] = (
-                        f"9-ball potted by combination (hit ball {self.last_hit_ball} first)"
+                        f"bi9 potted by combination (hit bi{self.last_hit_ball} first)"
                     )
-                    event["message"] = (
-                        f"9-ball returned to table - potted by combination"
-                    )
+                    event["message"] = f"bi9 returned to table - potted by combination"
                     self._update_lowest_ball()
             else:
                 # Update lowest ball on table
@@ -570,48 +581,64 @@ class GameManager:
         else:
             # Set foul reason based on what went wrong
             event["foul_reason"] = (
-                f"Did not hit ball {self.lowest_ball} first (hit ball {self.last_hit_ball})"
+                f"Did not hit bi{self.lowest_ball} first (hit bi{self.last_hit_ball})"
             )
 
         self._add_event("potted", event)
         return event
 
-    def process_foul(self, reason: str) -> Dict:
+    def process_foul(self, reason: str, frame_idx: int = None) -> Dict:
         """
-        Process a foul - reverts game state to snapshot before turn
+        Process a foul - increment foul count and switch turn
+        NEW RULE: Potted balls stay potted even during fouls
 
         Args:
             reason: Description of the foul
+            frame_idx: Current frame number (optional, for logging)
 
         Returns:
             Event dict with foul info
         """
         current_player = self.players[self.current_player_idx]
-        reverted_balls = self.last_potted_balls.copy()
+        potted_balls = self.last_potted_balls.copy()
 
-        # Increment foul count before reversion
+        # Increment foul count
         current_player.foul_count += 1
 
-        # Revert to snapshot if available (more reliable than manual reversion)
-        if self.current_snapshot:
-            # Save foul count and revert
-            foul_count = current_player.foul_count
-            self.revert_to_snapshot()
-            # Restore foul count after reversion
-            self.players[self.current_player_idx].foul_count = foul_count
-        else:
-            # Fallback to manual reversion if no snapshot
-            for ball in self.last_potted_balls:
-                self.balls_on_table.add(ball)
-                if ball in current_player.potted_balls:
-                    current_player.potted_balls.remove(ball)
+        # Log foul details to file for debugging
+        frame_info = f"Frame {frame_idx}" if frame_idx else "Frame unknown"
+        foul_log = (
+            f"⚠️ FOUL - {current_player.name} | "
+            f"{frame_info} | "
+            f"Reason: {reason} | "
+            f"Lowest ball: bi{self.lowest_ball} | "
+            f"Balls potted this turn: {potted_balls} | "
+            f"Balls KEPT potted (not reverted)"
+        )
+        print(foul_log)  # Console output
+        
+        # Log to file with immediate flush
+        try:
+            from pathlib import Path
+            log_dir = Path('backend/logs')
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = log_dir / f'game_events_{datetime.now().strftime("%Y%m%d")}.log'
+            with open(log_file, 'a', buffering=1) as f:
+                f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {foul_log}\n")
+                f.flush()
+        except Exception as e:
+            print(f"Failed to write foul log: {e}")
+
+        # NEW RULE: Don't revert balls - they stay potted
+        # Player gets credit for potted balls even during foul
+        # Lowest ball already updated when balls were potted
 
         event = {
             "event": "foul",
             "player": current_player.name,
             "reason": reason,
-            "reverted_balls": reverted_balls,
-            "message": f"Foul by {current_player.name}: {reason}",
+            "potted_balls": potted_balls,
+            "message": f"Foul by {current_player.name}: {reason} (balls stay potted)",
         }
 
         self._add_event("foul", event)
@@ -621,9 +648,12 @@ class GameManager:
 
         return event
 
-    def check_movement_timeout(self) -> Optional[Dict]:
+    def check_movement_timeout(self, current_frame: int = None) -> Optional[Dict]:
         """
         Check if movement has stopped for too long and switch turn
+
+        Args:
+            current_frame: Current frame number (optional, for logging)
 
         Returns:
             Turn change event if timeout occurred, None otherwise
@@ -634,12 +664,34 @@ class GameManager:
             ).total_seconds()
 
             if time_since_movement > self.movement_timeout:
+                # Log shot completion to file (for testing/debugging)
+                frame_info = f"Frame {current_frame}" if current_frame else "Frame unknown"
+                shot_log = (
+                    f"🎯 Shot complete for {self.players[self.current_player_idx].name} | "
+                    f"{frame_info} | "
+                    f"Balls potted: {self.last_potted_balls} | "
+                    f"Lowest ball: {self.lowest_ball}"
+                )
+                print(shot_log)  # Console output
+                
+                # Also log to file with immediate flush
+                try:
+                    from pathlib import Path
+                    log_dir = Path('backend/logs')
+                    log_dir.mkdir(parents=True, exist_ok=True)
+                    log_file = log_dir / f'game_events_{datetime.now().strftime("%Y%m%d")}.log'
+                    with open(log_file, 'a', buffering=1) as f:  # Line buffering for immediate flush
+                        f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {shot_log}\n")
+                        f.flush()  # Force immediate write to disk
+                except Exception as e:
+                    print(f"Failed to write to log file: {e}")
+
                 # No ball potted, switch turn
                 if not self.last_potted_balls:
                     return self._switch_turn()
                 else:
                     # Balls were potted, finalize turn
-                    return self.finalize_turn()
+                    return self.finalize_turn(current_frame=current_frame)
 
         return None
 
@@ -649,33 +701,37 @@ class GameManager:
         if is_moving:
             self.last_movement_time = datetime.now()
 
-    def finalize_turn(self) -> Dict:
+    def finalize_turn(self, current_frame: int = None) -> Dict:
         """
         Finalize the current turn and switch to next player if needed
+        SIMPLIFIED RULE: If any balls potted, player continues. Otherwise, turn switches.
+
+        Args:
+            current_frame: Current frame number (optional, for logging)
 
         Returns:
             Event dict with turn finalization info
         """
         current_player = self.players[self.current_player_idx]
 
-        # Check if valid hit was made
-        if self.last_hit_ball != self.lowest_ball:
-            return self.process_foul(f"Did not hit ball {self.lowest_ball} first")
-
-        # If balls were potted legally, player continues
-        if self.last_potted_balls and all(
-            ball in current_player.potted_balls for ball in self.last_potted_balls
-        ):
+        # SIMPLIFIED: Just check if any balls were potted
+        # No need to validate which ball was hit first
+        if self.last_potted_balls:
+            # Player continues because they pocketed at least one ball
             event = {
                 "event": "turn_continue",
                 "player": current_player.name,
                 "potted": self.last_potted_balls,
-                "message": f"{current_player.name} continues",
+                "message": f"{current_player.name} continues (pocketed bi{', bi'.join(map(str, self.last_potted_balls))})",
             }
+            print(
+                f"[GameManager] Player continues - pocketed balls: {self.last_potted_balls}"
+            )
             self._reset_turn_state()
             return event
 
-        # Otherwise, switch turn
+        # No balls potted - switch turn
+        print(f"[GameManager] No balls potted - switching turn")
         return self._switch_turn()
 
     def _switch_turn(self) -> Dict:
@@ -707,9 +763,29 @@ class GameManager:
         self.create_turn_snapshot()
 
     def _update_lowest_ball(self):
-        """Update the lowest ball on table"""
-        if self.balls_on_table:
-            self.lowest_ball = min(self.balls_on_table)
+        """
+        Update the lowest ball on table
+
+        Uses BallTracker to determine which balls are actually visible (ON_TABLE state).
+        Only balls in ON_TABLE state count as valid targets - MISSING/POTTED balls are excluded.
+        """
+        # Get balls that are actually visible on table (ON_TABLE state only)
+        visible_balls = [
+            ball_num
+            for ball_num in range(1, 10)
+            if self.ball_tracker.is_on_table(ball_num)
+        ]
+
+        if visible_balls:
+            self.lowest_ball = min(visible_balls)
+            print(
+                f"[GameManager] Lowest ball updated to {self.lowest_ball} (visible balls: {visible_balls})"
+            )
+        else:
+            # No balls visible - keep current lowest_ball or set to 1
+            print(
+                f"[GameManager] No visible balls, keeping lowest_ball={self.lowest_ball}"
+            )
 
     def _end_game(self, winner_idx: int):
         """End the game with a winner"""

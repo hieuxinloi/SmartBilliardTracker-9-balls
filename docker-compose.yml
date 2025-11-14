@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   # Original video processing API
   backend:
@@ -12,9 +10,14 @@ services:
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
       - ./models:/app/models
+      # Mount backend code for hot reload (development only)
+      - ./backend:/app/backend
+      - ./detect_collision.py:/app/detect_collision.py
+      - ./ball_detect.py:/app/ball_detect.py
+      - ./utils.py:/app/utils.py
     environment:
       - PYTHONUNBUFFERED=1
-    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
     networks:
       - billiard-network
 
@@ -30,6 +33,11 @@ services:
       - ./outputs:/app/outputs
       - ./models:/app/models
       - ./match_history:/app/match_history
+      # Mount backend code for hot reload (development only)
+      - ./backend:/app/backend
+      - ./detect_collision.py:/app/detect_collision.py
+      - ./ball_detect.py:/app/ball_detect.py
+      - ./utils.py:/app/utils.py
     environment:
       - PYTHONUNBUFFERED=1
     command: python backend/main_game.py
