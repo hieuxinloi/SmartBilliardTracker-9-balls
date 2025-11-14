@@ -223,10 +223,16 @@ const GameBoard = ({
     };
   }, [useCamera]);
 
-  // Ensure video plays when source changes
+  // Ensure video plays when source changes (but NOT when using MJPEG stream)
   useEffect(() => {
     const video = videoRef.current;
     if (!video || useCamera) return;
+
+    // Don't play video if we're using MJPEG stream
+    if (isLive && streamUrl) {
+      console.log("[GameBoard] Skipping video play - using MJPEG stream");
+      return;
+    }
 
     const handleVideoLoad = async () => {
       try {
@@ -248,7 +254,7 @@ const GameBoard = ({
     return () => {
       video.removeEventListener("loadeddata", handleVideoLoad);
     };
-  }, [videoSource, useCamera]);
+  }, [videoSource, useCamera, isLive, streamUrl]);
 
   return (
     <div
@@ -272,11 +278,20 @@ const GameBoard = ({
           />
         ) : isLive && streamUrl ? (
           // Live mode: use server-side MJPEG stream for smooth visualization
-          <img
-            src={streamUrl}
-            alt="Live stream"
-            className="absolute top-0 left-0 w-full h-full object-contain bg-black"
-          />
+          // Hide video element completely when using MJPEG stream
+          <>
+            <img
+              src={streamUrl}
+              alt="Live stream"
+              className="absolute top-0 left-0 w-full h-full object-contain bg-black"
+              onError={(e) =>
+                console.error("[GameBoard] MJPEG stream error:", e)
+              }
+              onLoad={() => console.log("[GameBoard] MJPEG stream loaded")}
+            />
+            {/* Hidden video ref for dimension calculations only - don't load src */}
+            <video ref={videoRef} className="hidden" muted playsInline />
+          </>
         ) : videoSource ? (
           // Show uploaded video (will play in frontend while backend processes separately)
           <video

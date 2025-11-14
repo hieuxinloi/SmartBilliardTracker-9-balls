@@ -8,19 +8,28 @@ from typing import List, Dict, Any, Tuple, Optional
 
 
 class BallTracker:
-    """Track balls across frames to detect pocketing"""
+    """Track balls across frames to detect pocketing with stability check"""
 
-    def __init__(self, disappearance_threshold: int = 30):
+    def __init__(
+        self,
+        disappearance_threshold: int = 30,
+        static_window: int = 5,
+        static_thresh: float = 2.0,
+    ):
         """
         Initialize ball tracker
 
         Args:
             disappearance_threshold: Number of frames a ball must be missing to be considered potted
+            static_window: Number of recent detections to inspect for movement
+            static_thresh: Maximum movement (pixels) across window to consider ball static
         """
         self.ball_history: Dict[str, List[Dict]] = {}  # ball_name -> list of detections
         self.last_seen: Dict[str, int] = {}  # ball_name -> last frame number
         self.potted_balls: Dict[str, int] = {}  # ball_name -> frame where potted
         self.disappearance_threshold = disappearance_threshold
+        self.static_window = static_window
+        self.static_thresh = static_thresh
 
     def update(self, frame_id: int, detections: List[Dict[str, Any]]):
         """
@@ -57,26 +66,52 @@ class BallTracker:
             # Update last seen
             self.last_seen[ball_name] = frame_id
 
-        # Check for disappeared balls
-        for ball_name, last_frame in list(self.last_seen.items()):
-            # Skip if already marked as potted
-            if ball_name in self.potted_balls:
-                continue
+        # Check if ALL currently visible balls are static
+        all_balls_static = self._are_all_balls_static(detections)
 
-            # Check if ball has disappeared
-            frames_missing = frame_id - last_frame
+        # Debug: log static status
+        if frame_id % 30 == 0:  # Log every second at 30fps
+            detected_names = [d["name"] for d in detections]
+            missing_balls = [
+                name for name in self.last_seen.keys() if name not in detected_names
+            ]
+            print(
+                f"[BallTracker] Frame {frame_id}: all_balls_static={all_balls_static}, visible={detected_names}, missing={missing_balls}"
+            )
 
-            if frames_missing >= self.disappearance_threshold:
-                # Ball has been missing long enough - consider it potted
-                self.potted_balls[ball_name] = last_frame
-                newly_potted.append(
-                    {
-                        "ball_name": ball_name,
-                        "frame_potted": last_frame,
-                        "frame_detected": frame_id,
-                        "position": self._get_last_position(ball_name),
-                    }
-                )
+        # Only check for potted balls when ALL balls are static
+        if all_balls_static:
+            # Check for disappeared balls
+            for ball_name, last_frame in list(self.last_seen.items()):
+                # Skip if already marked as potted
+                if ball_name in self.potted_balls:
+                    continue
+
+                # Check if ball has disappeared
+                frames_missing = frame_id - last_frame
+
+                if frames_missing >= self.disappearance_threshold:
+                    # Check if this specific ball was static before disappearing
+                    if self._was_static(ball_name):
+                        print(
+                            f"[BallTracker] Ball {ball_name} detected as potted: missing for {frames_missing} frames, was static before disappearing"
+                        )
+                        self.potted_balls[ball_name] = last_frame
+                        newly_potted.append(
+                            {
+                                "ball_name": ball_name,
+                                "frame_potted": last_frame,
+                                "frame_detected": frame_id,
+                                "position": self._get_last_position(ball_name),
+                                "static_before": True,
+                                "all_balls_static": True,
+                            }
+                        )
+                    else:
+                        if frames_missing % 30 == 0:  # Log periodically
+                            print(
+                                f"[BallTracker] Ball {ball_name} missing for {frames_missing} frames but was NOT static before disappearing"
+                            )
 
         return newly_potted
 
@@ -107,6 +142,37 @@ class BallTracker:
         self.ball_history.clear()
         self.last_seen.clear()
         self.potted_balls.clear()
+
+    def _was_static(self, ball_name: str) -> bool:
+        """Determine if ball had minimal movement over the last static_window detections"""
+        history = self.ball_history.get(ball_name, [])
+        if len(history) < self.static_window:
+            return False  # Not enough data to confirm static
+        recent = history[-self.static_window :]
+        xs = [d["x"] for d in recent]
+        ys = [d["y"] for d in recent]
+        x_range = max(xs) - min(xs)
+        y_range = max(ys) - min(ys)
+        is_static = x_range <= self.static_thresh and y_range <= self.static_thresh
+        # Debug logging for balls that fail static check
+        if not is_static and len(history) >= self.static_window:
+            print(
+                f"[BallTracker] Ball {ball_name} NOT static: x_range={x_range:.2f}, y_range={y_range:.2f} (thresh={self.static_thresh})"
+            )
+        return is_static
+
+    def _are_all_balls_static(self, current_detections: List[Dict[str, Any]]) -> bool:
+        """Check if ALL currently visible balls are static"""
+        if not current_detections:
+            return True  # No balls visible, consider static
+
+        for detection in current_detections:
+            ball_name = detection["name"]
+            # Check if this ball is static
+            if not self._was_static(ball_name):
+                return False  # At least one ball is moving
+
+        return True  # All balls are static
 
 
 def detect_pockets(

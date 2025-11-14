@@ -32,6 +32,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ball_detect import detect_video, YOLO
 from detect_collision import get_collisions_from_data
 from game_manager import GameManager, GameState
+from pocket_detection import BallTracker
 
 app = FastAPI(
     title="SmartBilliardTracker API",
@@ -58,9 +59,17 @@ DATA_DIR.mkdir(exist_ok=True)
 
 # Global game state
 game_manager = GameManager()
+# Quick pocket detection: 10 frames (~0.33 seconds at 30fps) missing + 5 frames static check
+ball_tracker = BallTracker(
+    disappearance_threshold=10,  # Must be missing for 10 frames (0.33 seconds)
+    static_window=5,  # Check last 5 detections for movement
+    static_thresh=3.0,  # Max 3.0 pixels movement to be considered static
+)
 active_detection_task = None
 detection_stop_event = asyncio.Event()
-frame_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+# Use a simple variable to store latest frame instead of queue (avoids frame dropping)
+latest_frame: bytes = b""
+frame_lock = asyncio.Lock()
 
 
 # ============= Models =============
@@ -198,15 +207,36 @@ async def process_frame_for_game(frame, frame_idx, model, prev_frame_detections)
         return [], []
 
 
-async def detect_pockets(frame, balls):
+async def detect_pockets(frame_idx, balls):
     """
-    Detect if any balls have been potted (simplified version)
-    Returns list of potted ball names
+    Detect if any balls have been potted using BallTracker
+
+    Args:
+        frame_idx: Current frame number
+        balls: List of detected balls in current frame
+
+    Returns:
+        List of newly potted ball names
     """
-    # TODO: Implement pocket detection logic
-    # For now, detect if ball disappears from frame
-    potted = []
-    return potted
+    global ball_tracker
+
+    # Convert balls to detection format
+    detections = []
+    for ball in balls:
+        detections.append(
+            {
+                "name": ball["name"],
+                "x": ball["x"],
+                "y": ball["y"],
+                "confidence": ball.get("confidence", 1.0),
+            }
+        )
+
+    # Update tracker and get newly potted balls
+    newly_potted = ball_tracker.update(frame_idx, detections)
+
+    # Return list of ball names that were just potted
+    return [potted["ball_name"] for potted in newly_potted]
 
 
 # ============= Real-time Detection Task =============
@@ -248,13 +278,16 @@ async def real_time_detection_task(
         prev_frame_data = None
         frames_buffer = []  # Store recent frames for collision detection
         last_collision_check = 0
+        recent_collisions = (
+            []
+        )  # Track recent collisions for visualization (frame_idx, ball_data)
 
         # Notify game started
         await manager.broadcast(
             {
                 "event": "detection_start",
                 "message": "AI detection started",
-                "game_state": game_manager.get_game_state(),
+                "game_state": convert_numpy_types(game_manager.get_game_state()),
             }
         )
 
@@ -301,22 +334,39 @@ async def real_time_detection_task(
                         (cueball_now["x"] - cueball_prev["x"]) ** 2
                         + (cueball_now["y"] - cueball_prev["y"]) ** 2
                     )
-                    is_moving = dist > 2.0  # pixels
+                    is_moving = bool(dist > 2.0)  # Convert numpy.bool_ to Python bool
 
                 game_manager.update_movement(is_moving)
 
-            # Collision detection every 10 frames
-            if len(frames_buffer) >= 10 and frame_idx - last_collision_check >= 10:
+            # Collision detection every 5 frames (more frequent to catch collisions)
+            if len(frames_buffer) >= 10 and frame_idx - last_collision_check >= 5:
                 last_collision_check = frame_idx
+
+                # Check if cueball is present in recent frames before running collision detection
+                recent_frames = frames_buffer[-10:]
+                cueball_present = any(
+                    any(b["name"] == "cueball" for b in frame["balls"]) 
+                    for frame in recent_frames
+                )
+
+                if not cueball_present:
+                    print(f"[COLLISION] Skipping - cueball not found in recent frames at frame {frame_idx}")
 
                 # Run collision detection on recent frames
                 try:
                     collisions = get_collisions_from_data(
-                        frames_buffer[-10:],
+                        recent_frames,
                         cue_ball_name="cueball",
                         move_thresh=0.3,
                         contact_margin=10.0,
                     )
+
+                    # Log collision detection results
+                    if collisions:
+                        print(f"[COLLISION] Detected {len(collisions)} collision(s) at frame {frame_idx}")
+                    elif cueball_present and frame_idx % 60 == 0:
+                        # Log periodically when no collisions detected but cueball is present
+                        print(f"[COLLISION] No collisions detected at frame {frame_idx} (cueball present)")
 
                     # Process each collision
                     for coll in collisions:
@@ -327,6 +377,16 @@ async def real_time_detection_task(
                             coll["cueball"]
                         )
                         collision_event["ball"] = convert_numpy_types(coll["ball"])
+
+                        # Store collision for visualization (keep for ~30 frames)
+                        recent_collisions.append(
+                            {
+                                "frame_idx": frame_idx,
+                                "cueball": coll["cueball"],
+                                "ball": coll["ball"],
+                                "ball_name": ball_name,
+                            }
+                        )
 
                         await manager.broadcast(collision_event)
 
@@ -340,6 +400,61 @@ async def real_time_detection_task(
                 except Exception as e:
                     print(f"[ERROR] Collision detection: {e}")
 
+            # Check for potted balls using new ball tracking system
+            try:
+                # Extract ball numbers from detections
+                detected_ball_numbers = []
+                cueball_detected = False
+
+                for ball in balls:
+                    if ball["name"] == "cueball":
+                        cueball_detected = True
+                    elif ball["name"].startswith("bi"):
+                        try:
+                            ball_num = int(ball["name"].replace("bi", ""))
+                            if 1 <= ball_num <= 9:
+                                detected_ball_numbers.append(ball_num)
+                        except (ValueError, AttributeError):
+                            pass
+
+                # Log detection every 30 frames for debugging
+                if frame_idx % 30 == 0:
+                    print(f"[DETECT] Frame {frame_idx}: Cueball={cueball_detected}, Balls={sorted(detected_ball_numbers)}")
+
+                # Update ball tracking (handles potted, reappeared, scratch)
+                tracking_events = game_manager.update_ball_tracking(
+                    frame_idx, detected_ball_numbers, cueball_detected
+                )
+
+                # Broadcast all tracking events
+                for event in tracking_events:
+                    event["frame_idx"] = frame_idx
+                    await manager.broadcast(event)
+
+                    # Log events
+                    event_type = event.get("event")
+                    if event_type == "potted":
+                        print(
+                            f"[POCKET] Ball {event.get('ball')} potted at frame {frame_idx}"
+                        )
+                    elif event_type == "ball_reappeared":
+                        print(
+                            f"[REAPPEAR] Ball {event.get('ball')} reappeared (was occluded)"
+                        )
+                    elif event_type == "cueball_scratch":
+                        print(f"[SCRATCH] Cueball scratched at frame {frame_idx}")
+
+                    # Check if game ended
+                    if event.get("game_end", False):
+                        print(f"[GAME] Game ended - Winner: {event.get('winner')}")
+                        break
+
+            except Exception as e:
+                print(f"[ERROR] Ball tracking: {e}")
+                import traceback
+
+                traceback.print_exc()
+
             # Check for movement timeout
             timeout_event = game_manager.check_movement_timeout()
             if timeout_event:
@@ -351,28 +466,49 @@ async def real_time_detection_task(
                     "event": "frame_update",
                     "frame_idx": frame_idx,
                     "balls": convert_numpy_types(balls),
-                    "game_state": game_manager.get_game_state(),
+                    "game_state": convert_numpy_types(game_manager.get_game_state()),
                 }
             )
 
-            # Build annotated frame for streaming
+            # Build annotated frame for streaming (match Python visualize_video style)
             try:
                 display = frame.copy()
-                # Draw balls
+
+                # Separate cueball and other balls
+                cueball = None
+                other_balls = []
+                for b in balls:
+                    if b["name"] == "cueball":
+                        cueball = b
+                    else:
+                        other_balls.append(b)
+
+                # Draw all balls with circles and labels
                 for b in balls:
                     cx, cy, r = int(b["x"]), int(b["y"]), int(b["r"])
-                    color = (0, 255, 0)
+
+                    # Color: green for cueball, white for others
                     if b["name"] == "cueball":
-                        color = (255, 255, 255)
+                        color = (0, 255, 0)  # Green for cueball
+                    else:
+                        color = (255, 255, 255)  # White for other balls
+
+                    # Draw circle around ball
                     cv2.circle(display, (cx, cy), r, color, 2)
+                    # Draw center dot
                     cv2.circle(display, (cx, cy), 3, color, -1)
-                    label = f"{b['name']}"  # omit conf to keep compact
+                    # Draw radius line (from center to edge)
+                    cv2.line(display, (cx, cy), (cx + r, cy), color, 1)
+
+                    # Draw ball name with black outline for visibility
+                    label = f"{b['name']}"
+                    label_pos = (max(cx - r, 0), max(cy - r - 10, 0))
                     cv2.putText(
                         display,
                         label,
-                        (max(cx - r, 0), max(cy - r - 10, 0)),
+                        label_pos,
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
+                        0.5,
                         (0, 0, 0),
                         3,
                         cv2.LINE_AA,
@@ -380,28 +516,88 @@ async def real_time_detection_task(
                     cv2.putText(
                         display,
                         label,
-                        (max(cx - r, 0), max(cy - r - 10, 0)),
+                        label_pos,
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        (0, 255, 255),
+                        0.5,
+                        color,
                         1,
                         cv2.LINE_AA,
+                    )
+
+                # Draw distance lines from cueball to all other balls
+                if cueball is not None:
+                    for ball in other_balls:
+                        # Draw line from cueball to ball
+                        cv2.line(
+                            display,
+                            (int(cueball["x"]), int(cueball["y"])),
+                            (int(ball["x"]), int(ball["y"])),
+                            (128, 128, 128),  # Gray color
+                            1,
+                        )
+                        # Calculate and display distance
+                        dist = np.sqrt(
+                            (cueball["x"] - ball["x"]) ** 2
+                            + (cueball["y"] - ball["y"]) ** 2
+                        )
+                        mid_x = int((cueball["x"] + ball["x"]) / 2)
+                        mid_y = int((cueball["y"] + ball["y"]) / 2)
+                        cv2.putText(
+                            display,
+                            f"{dist:.1f}",
+                            (mid_x, mid_y),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.4,
+                            (128, 128, 128),
+                            1,
+                        )
+
+                # Visualize recent collisions (keep visible for ~30 frames)
+                # Clean up old collisions
+                recent_collisions[:] = [
+                    c for c in recent_collisions if frame_idx - c["frame_idx"] <= 30
+                ]
+
+                for coll_data in recent_collisions:
+                    cue = coll_data["cueball"]
+                    ball = coll_data["ball"]
+
+                    # Highlight the collided ball with thick red circle
+                    ball_cx, ball_cy, ball_r = (
+                        int(ball["x"]),
+                        int(ball["y"]),
+                        int(ball["r"]),
+                    )
+                    cv2.circle(display, (ball_cx, ball_cy), ball_r, (0, 0, 255), 3)
+
+                    # Draw thick yellow line from cueball to collided ball
+                    cv2.line(
+                        display,
+                        (int(cue["x"]), int(cue["y"])),
+                        (int(ball["x"]), int(ball["y"])),
+                        (0, 255, 255),  # Yellow
+                        3,
+                    )
+
+                    # Display collision text
+                    cv2.putText(
+                        display,
+                        f"Collision with {coll_data['ball_name']}",
+                        (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1,
+                        (0, 255, 255),
+                        2,
                     )
 
                 # Encode JPEG
                 ok, buf = cv2.imencode(".jpg", display)
                 if ok:
                     jpg_bytes = buf.tobytes()
-                    # Keep only latest frame
-                    if frame_queue.full():
-                        try:
-                            _ = frame_queue.get_nowait()
-                        except Exception:
-                            pass
-                    try:
-                        frame_queue.put_nowait(jpg_bytes)
-                    except Exception:
-                        pass
+                    # Store latest frame (thread-safe with lock)
+                    async with frame_lock:
+                        global latest_frame
+                        latest_frame = jpg_bytes
             except Exception as e:
                 print(f"[Stream] Annotate frame error: {e}")
 
@@ -417,7 +613,7 @@ async def real_time_detection_task(
             {
                 "event": "detection_stop",
                 "message": "AI detection stopped",
-                "game_state": game_manager.get_game_state(),
+                "game_state": convert_numpy_types(game_manager.get_game_state()),
             }
         )
 
@@ -502,15 +698,14 @@ async def start_game(request: GameStartRequest, background_tasks: BackgroundTask
     # Reset detection event
     detection_stop_event.clear()
 
-    # Clear any leftover frames in stream queue
-    try:
-        while True:
-            _ = frame_queue.get_nowait()
-    except Exception:
-        pass
+    # Clear latest frame
+    async with frame_lock:
+        global latest_frame
+        latest_frame = b""
 
-    # Reset game manager
+    # Reset game manager and ball tracker
     game_manager.reset_game()
+    ball_tracker.reset()
 
     # Initialize new game
     game_state = game_manager.start_game(
@@ -549,7 +744,7 @@ async def stop_game(request: GameStopRequest):
     return {
         "status": "stopped",
         "reason": request.reason,
-        "game_state": game_manager.get_game_state(),
+        "game_state": convert_numpy_types(game_manager.get_game_state()),
     }
 
 
@@ -607,7 +802,10 @@ async def websocket_game(websocket: WebSocket):
     try:
         # Send current game state on connect
         await websocket.send_json(
-            {"event": "connected", "game_state": game_manager.get_game_state()}
+            {
+                "event": "connected",
+                "game_state": convert_numpy_types(game_manager.get_game_state()),
+            }
         )
 
         while True:
@@ -662,17 +860,21 @@ async def stream_video():
 
     async def frame_generator():
         placeholder = _make_placeholder_jpeg("No frames yet - stream alive")
+        last_sent_frame = None
+
         while True:
-            # If game not playing, emit placeholder frames at a slow pace to keep connection warm
-            if game_manager.state != GameState.PLAYING:
-                await asyncio.sleep(0.5)
-                frame = placeholder
+            # Get the latest frame (shared across all stream clients)
+            async with frame_lock:
+                current_frame = latest_frame if latest_frame else placeholder
+
+            # Only send if frame has changed (reduces bandwidth for slow updates)
+            if current_frame != last_sent_frame:
+                last_sent_frame = current_frame
+                frame = current_frame
             else:
-                try:
-                    frame = await asyncio.wait_for(frame_queue.get(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    # Keep the stream alive with a heartbeat frame to prevent browser freezing/caching
-                    frame = placeholder
+                # Same frame, wait a bit before checking again
+                await asyncio.sleep(0.033)  # ~30fps check rate
+                continue
 
             yield (
                 b"--"
@@ -683,6 +885,9 @@ async def stream_video():
                 + frame
                 + b"\r\n"
             )
+
+            # Small delay to prevent excessive CPU usage
+            await asyncio.sleep(0.001)
 
     return StreamingResponse(
         frame_generator(),

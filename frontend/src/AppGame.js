@@ -101,6 +101,31 @@ function App() {
       // Could add turn change animation here
     });
 
+    // Ball missing (tentatively potted - show in UI immediately)
+    on("ball_missing", (data) => {
+      console.log("[Ball Missing - Tentatively Potted]", data);
+      console.log(`Ball ${data.ball} disappeared - showing as potted in status bar`);
+      // Game state will be updated automatically via frame_update
+    });
+
+    // Ball reappearance (was occluded, not potted)
+    on("ball_reappeared", (data) => {
+      console.log("[Ball Reappeared]", data);
+      console.log(`Ball ${data.ball} was occluded, not actually potted - reverting status`);
+      // Game state will be updated automatically via frame_update
+    });
+
+    // Cueball scratch
+    on("cueball_scratch", (data) => {
+      console.log("[Cueball Scratch]", data);
+      setFoulData({
+        reason: "Cueball scratched (potted)",
+        player: data.player,
+      });
+      setShowFoul(true);
+      setTimeout(() => setShowFoul(false), 3000);
+    });
+
     // Game end
     on("game_end", (data) => {
       console.log("[Game End]", data);
@@ -135,6 +160,9 @@ function App() {
       off("first_hit");
       off("foul");
       off("turn_change");
+      off("ball_missing");
+      off("ball_reappeared");
+      off("cueball_scratch");
       off("game_end");
       off("detection_start");
       off("detection_stop");
