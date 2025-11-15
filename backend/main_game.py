@@ -30,18 +30,17 @@ import logging
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
 # Create game events log file
-game_events_logger = logging.getLogger('game_events')
+game_events_logger = logging.getLogger("game_events")
 game_events_logger.setLevel(logging.INFO)
-game_log_dir = Path('backend/logs')
+game_log_dir = Path("backend/logs")
 game_log_dir.mkdir(parents=True, exist_ok=True)
 game_log_file = game_log_dir / f'game_events_{datetime.now().strftime("%Y%m%d")}.log'
 file_handler = logging.FileHandler(game_log_file)
-file_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+file_handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
 game_events_logger.addHandler(file_handler)
 
 # Add parent directory to path to import project modules

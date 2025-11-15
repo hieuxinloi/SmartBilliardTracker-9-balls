@@ -399,7 +399,9 @@ class GameManager:
 
         return events
 
-    def check_cueball_scratch(self, cueball_detected: bool, frame_idx: int = None) -> Optional[Dict]:
+    def check_cueball_scratch(
+        self, cueball_detected: bool, frame_idx: int = None
+    ) -> Optional[Dict]:
         """
         Check if cueball has been scratched (potted)
 
@@ -616,15 +618,18 @@ class GameManager:
             f"Balls KEPT potted (not reverted)"
         )
         print(foul_log)  # Console output
-        
+
         # Log to file with immediate flush
         try:
             from pathlib import Path
-            log_dir = Path('backend/logs')
+
+            log_dir = Path("backend/logs")
             log_dir.mkdir(parents=True, exist_ok=True)
             log_file = log_dir / f'game_events_{datetime.now().strftime("%Y%m%d")}.log'
-            with open(log_file, 'a', buffering=1) as f:
-                f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {foul_log}\n")
+            with open(log_file, "a", buffering=1) as f:
+                f.write(
+                    f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {foul_log}\n"
+                )
                 f.flush()
         except Exception as e:
             print(f"Failed to write foul log: {e}")
@@ -665,7 +670,9 @@ class GameManager:
 
             if time_since_movement > self.movement_timeout:
                 # Log shot completion to file (for testing/debugging)
-                frame_info = f"Frame {current_frame}" if current_frame else "Frame unknown"
+                frame_info = (
+                    f"Frame {current_frame}" if current_frame else "Frame unknown"
+                )
                 shot_log = (
                     f"🎯 Shot complete for {self.players[self.current_player_idx].name} | "
                     f"{frame_info} | "
@@ -673,15 +680,22 @@ class GameManager:
                     f"Lowest ball: {self.lowest_ball}"
                 )
                 print(shot_log)  # Console output
-                
+
                 # Also log to file with immediate flush
                 try:
                     from pathlib import Path
-                    log_dir = Path('backend/logs')
+
+                    log_dir = Path("backend/logs")
                     log_dir.mkdir(parents=True, exist_ok=True)
-                    log_file = log_dir / f'game_events_{datetime.now().strftime("%Y%m%d")}.log'
-                    with open(log_file, 'a', buffering=1) as f:  # Line buffering for immediate flush
-                        f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {shot_log}\n")
+                    log_file = (
+                        log_dir / f'game_events_{datetime.now().strftime("%Y%m%d")}.log'
+                    )
+                    with open(
+                        log_file, "a", buffering=1
+                    ) as f:  # Line buffering for immediate flush
+                        f.write(
+                            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {shot_log}\n"
+                        )
                         f.flush()  # Force immediate write to disk
                 except Exception as e:
                     print(f"Failed to write to log file: {e}")
